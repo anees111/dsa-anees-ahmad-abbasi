@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 
-st.title("CSV helloz File Uploader and Viewer")
+st.title("MyModel for Predictive Maintenance")
 
 # Upload your input CSV file
 uploaded_file = st.file_uploader("Upload your input CSV file", type=["csv"])
@@ -31,5 +31,8 @@ if uploaded_file is not None:
                 st.write("Preprocessed Data:")
                 preprocessed_df = pd.DataFrame(response_data["data"])
                 st.dataframe(preprocessed_df)
+                st.write("Predictions:")
+                predictions = response_data["predictions"]
+                st.dataframe(predictions)
         else:
             st.error("Error occurred during preprocessing.")

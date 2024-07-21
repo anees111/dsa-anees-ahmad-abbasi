@@ -76,7 +76,23 @@ async def preprocess_file(file: UploadFile = File(...), window_size: int = Form(
     
     try:
         preprocessed_data = preprocess_test_data(df, "../items/scaler_001.pkl", window_size)
-        return {"data_shape": preprocessed_data.shape, "data": preprocessed_data.tolist()}
+        # Select the appropriate model based on the window size
+        if window_size == 1:
+            model = model_1
+        elif window_size == 5:
+            model = model_5
+        elif window_size == 10:
+            model = model_10
+        elif window_size == 15:
+            model = model_15
+        elif window_size == 30:
+            model = model_30
+        else:
+            return {"error": "Invalid window size"}
+        
+        # Make predictions
+        predictions = model.predict(preprocessed_data)
+        return {"data_shape": preprocessed_data.shape, "data": preprocessed_data.tolist(), "predictions": predictions.tolist()}
     except Exception as e:
         logging.error(f"Error during preprocessing: {str(e)}")
         return {"error": str(e)}

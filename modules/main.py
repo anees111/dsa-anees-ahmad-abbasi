@@ -7,6 +7,9 @@ from tensorflow.keras.utils import custom_object_scope
 import os
 import logging
 import io
+from sqlalchemy import create_engine, MetaData, Table
+from sqlalchemy.orm import sessionmaker
+from datetime import datetime
 from preprocess import preprocess_test_data
 
 app = FastAPI()
@@ -31,6 +34,17 @@ def asymmetric_loss(RUL_true, RUL_predicted, a1=10, a2=13):
 
 # Path to the models directory
 MODEL_DIR = "../items"
+
+# Database setup
+DATABASE_URL = "postgresql://rul_user:12345678@localhost/rul_db"
+engine = create_engine(DATABASE_URL)
+metadata = MetaData()
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+session = SessionLocal()
+
+# Load tables
+input_data_table = Table("input_data", metadata, autoload_with=engine)
+predictions_table = Table("predictions", metadata, autoload_with=engine)
 
 # Variables to hold the loaded models
 model_1 = None
@@ -66,9 +80,21 @@ async def load_models():
 async def upload_file(file: UploadFile = File(...)):
     contents = await file.read()
     df = pd.read_csv(io.StringIO(contents.decode('utf-8')), header=None)
-    return {"filename": file.filename, "data": df.to_dict()}  # Returning the entire data for demonstration
+    df.columns = list(range(df.shape[1]))  # Ensure columns are correctly indexed
+    
+    # Save input data to database
+    input_data_ids = []
+    for _, row in df.iterrows():
+        data_dict = row.to_dict()
+        data_dict['timestamp'] = datetime.utcnow()
+        insert_stmt = input_data_table.insert().values(**data_dict)
+        result = session.execute(insert_stmt)
+        input_data_ids.append(result.inserted_primary_key[0])
+    session.commit()
+    
+    return {"filename": file.filename, "data": df.to_dict(), "input_data_ids": input_data_ids}
 
-# Endpoint to preprocess CSV file based on window size
+# Endpoint to preprocess CSV file based on window size and save predictions
 @app.post("/preprocess/")
 async def preprocess_file(file: UploadFile = File(...), window_size: int = Form(...)):
     contents = await file.read()
@@ -92,7 +118,37 @@ async def preprocess_file(file: UploadFile = File(...), window_size: int = Form(
         
         # Make predictions
         predictions = model.predict(preprocessed_data)
-        return {"data_shape": preprocessed_data.shape, "data": preprocessed_data.tolist(), "predictions": predictions.tolist()}
+        
+        # Display the preprocessed data shape and predictions
+        response = {
+            "data_shape": preprocessed_data.shape,
+            "data": preprocessed_data.tolist(),
+            "predictions": predictions.tolist()
+        }
+
+        # Attempt to save predictions to database
+        try:
+            # Retrieve input_data_ids from the input_data_table
+            input_data_ids = session.execute(input_data_table.select()).fetchall()
+            
+            # Save predictions to database
+            for idx, prediction in enumerate(predictions):
+                if idx < len(input_data_ids):
+                    input_data_id = input_data_ids[idx][0]  # Get the correct input_data_id
+                    insert_stmt = predictions_table.insert().values(
+                        input_data_id=input_data_id,
+                        predicted_rul=float(prediction[0]),  # Convert numpy.float32 to Python float
+                        window_size=window_size,
+                        model_used=f"model_{window_size}",
+                        timestamp=datetime.utcnow()
+                    )
+                    session.execute(insert_stmt)
+            session.commit()
+        except Exception as e:
+            logging.error(f"Error saving to database: {str(e)}")
+            response["database_error"] = str(e)
+        
+        return response
     except Exception as e:
         logging.error(f"Error during preprocessing: {str(e)}")
         return {"error": str(e)}

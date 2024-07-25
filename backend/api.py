@@ -1,61 +1,57 @@
-# backend/api.py
-
-from fastapi import FastAPI, File, UploadFile, Depends
-import pandas as pd
-import joblib
-import h5py
-from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import IsolationForest
-from io import BytesIO
+from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
-from models import ProcessedData, SessionLocal
-
+from pydantic import BaseModel
+import numpy as np
+from model import ModelManager
+from database import get_db
+import logging
+ 
 app = FastAPI()
-
-# Load the Isolation Forest model from the HDF5 file
-def load_model():
-    with h5py.File(r'D:\AL-\action_learning\items\isolation_forest_model.h5', 'r') as hf:
-        model_data = hf['model'][:]
-    model = joblib.load(BytesIO(model_data))
-    return model
-
-model = load_model()
-scaler = StandardScaler()
-
-def get_db():
-    db = SessionLocal()
+model_manager = ModelManager('../items/isolation_forest_AD_model.h5')
+ 
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+ 
+class PredictionRequest(BaseModel):
+    data: list
+ 
+@app.on_event("startup")
+def startup_event():
+    model_manager.load_model()
+    logger.info("Model loaded at startup.")
+ 
+@app.post("/predict/")
+def predict(request: PredictionRequest, db: Session = Depends(get_db)):
     try:
-        yield db
-    finally:
-        db.close()
-
-@app.post("/detect_anomalies/")
-async def detect_anomalies(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    contents = await file.read()
-    df = pd.read_csv(BytesIO(contents), header=None)
-    
-    if df.empty:
-        return {"error": "Uploaded file is empty or invalid."}
-    
-    # Standardize the data
-    data_scaled = scaler.fit_transform(df)
-    
-    # Predict anomalies
-    predictions = model.predict(data_scaled)
-    df['anomaly'] = predictions
-    
-    # Store processed data into the database
-    for index, row in df.iterrows():
-        db_data = ProcessedData(
-            feature_1=row[0],  # Adjust according to the actual feature names
-            feature_2=row[1],  # Adjust according to the actual feature names
-            anomaly=int(row['anomaly'])  # Ensure anomaly is converted to int
-        )
-        db.add(db_data)
-    
-    db.commit()  # Commit all changes to the database
-    
-    # Convert DataFrame to JSON for response
-    result = df.to_json(orient='split')
-    
-    return {"data": result}
+        data = np.array(request.data)
+ 
+        # Ensure the data is not empty
+        if data.size == 0:
+            raise HTTPException(status_code=400, detail="Input data is empty.")
+ 
+        # Ensure the data shape is correct
+        if len(data.shape) == 1:
+            data = data.reshape(1, -1)
+        elif data.shape[1] != 24:
+            if data.shape[1] > 24:
+                data = data[:, :24]
+            else:
+                raise HTTPException(status_code=400, detail=f"Expected input shape (None, 24), but got {data.shape}")
+ 
+        logger.debug("Data shape for prediction: %s", data.shape)
+        predictions = model_manager.predict(data)
+ 
+        # Flatten predictions if necessary and ensure it's a list
+        if isinstance(predictions, np.ndarray):
+            predictions = predictions.flatten().tolist()
+        elif isinstance(predictions, list):
+            # If predictions are already a list, ensure they are correctly formatted
+            predictions = [item for sublist in predictions for item in sublist] if any(isinstance(i, list) for i in predictions) else predictions
+        else:
+            raise HTTPException(status_code=500, detail="Unexpected prediction format.")
+ 
+        logger.debug("Predictions: %s", predictions)
+        return {"predictions": predictions}
+    except Exception as e:
+        logger.error("Prediction error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail="Prediction error.")
